@@ -3748,7 +3748,7 @@ export function environmentRuntimeService(
     },
 
     /** Dispatch plugin-provided Runner execution, including resource preparation and task lifecycle. */
-    async task(input: { companyId: string; leaseId: string; operation: PluginEnvironmentTaskOperation }) {
+    async task(input: { companyId: string; leaseId: string; operation: PluginEnvironmentTaskOperation; executionContext?: unknown }) {
       if (!options.pluginWorkerManager) throw new Error("Plugin-provided Runner execution worker manager unavailable");
       return executeEnvironmentTask(db, options.pluginWorkerManager, input);
     },

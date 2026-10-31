@@ -856,6 +856,7 @@ export interface PluginWorkerManager {
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     executeLogSink?: ExecuteLogSink,
+    onWorkerSettled?: () => void,
   ): Promise<HostToWorkerMethods[M][1]>;
 
   /**
@@ -3931,23 +3932,29 @@ export function createPluginWorkerManager(
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
       executeLogSink?: ExecuteLogSink,
+      onWorkerSettled?: () => void,
     ): Promise<HostToWorkerMethods[M][1]> {
       const handle = workers.get(pluginId);
       if (!handle) {
+        onWorkerSettled?.();
         return Promise.reject(
           new Error(`No worker registered for plugin "${pluginId}"`),
         );
       }
       let finishInspection: (() => void) | undefined;
       if (method === "environmentInspectLease") {
-        if (activeInspections >= 2) return Promise.reject(new Error("Provider inspection concurrency limit reached"));
+        if (activeInspections >= 2) {
+          onWorkerSettled?.();
+          return Promise.reject(new Error("Provider inspection concurrency limit reached"));
+        }
         activeInspections += 1;
         let finished = false;
         finishInspection = () => { if (!finished) { finished = true; activeInspections -= 1; } };
       }
       // A caller timeout is not worker completion. Inspection capacity is
       // released only by its actual reply, send failure, or worker exit.
-      const result = handle.call(method, params, timeoutMs, executeLogSink, finishInspection);
+      const finish = onWorkerSettled ? () => { finishInspection?.(); onWorkerSettled(); } : finishInspection;
+      const result = handle.call(method, params, timeoutMs, executeLogSink, finish);
       if (method === "configChanged") void result.then(() => {
         for (const listener of configApplied) {
           try { listener(); }

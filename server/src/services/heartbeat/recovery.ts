@@ -1842,6 +1842,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       reason:
         | "live_process_identifier"
         | "observed_owner_unverified"
+        | "startup_worker_unsettled"
         | "adopted_runner_authentication_timeout"
         | "native_chat_workspace_scope_mismatch";
       processPidAlive?: boolean;
@@ -1849,6 +1850,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     },
   ) {
     const durableOwnershipHold =
+      evidence.reason === "startup_worker_unsettled" ||
       evidence.reason === "adopted_runner_authentication_timeout" ||
       evidence.reason === "native_chat_workspace_scope_mismatch";
     if (
