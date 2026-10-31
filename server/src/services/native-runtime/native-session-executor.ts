@@ -9025,8 +9025,8 @@ async function executePaperclipNativeSessionWithinScope(
       if (input.execution.provider.kind === "codex" ||
           (input.execution.provider.kind === "acpx" && input.execution.provider.agent === "claude")) {
         executionContext = new NativeExecutionContext(input.execution,
-          Math.min(coldAdmissionTimeoutMs(input.execution.provider.kind, input.execution.provider.kind === "acpx" ? input.execution.provider.agent : undefined, false),
-            startupForAdmission!.executionLeaseRenewal!.remainingMs()));
+          Math.floor(Math.min(coldAdmissionTimeoutMs(input.execution.provider.kind, input.execution.provider.kind === "acpx" ? input.execution.provider.agent : undefined, false),
+            startupForAdmission!.executionLeaseRenewal!.remainingMs())));
         startupForAdmission!.executionContext = executionContext;
         if (startupForAdmission!.stopRequested) executionContext.abort(new Error("native_session_cancelled"));
       }

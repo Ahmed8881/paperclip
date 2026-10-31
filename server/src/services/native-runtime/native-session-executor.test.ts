@@ -6419,12 +6419,19 @@ describe("native startup cancellation fence", () => {
       expect(options.existingSession).toBe(session);
       expect(options.startup).toMatchObject({ deadlineAtMs: expect.any(Number), signal: expect.any(AbortSignal) });
       expect(options.startup.execution).toBe(second);
+      expect(Number.isSafeInteger(options.startup.deadlineAtMs)).toBe(true);
+      expect(options.startup.deadlineAtMs - Date.now()).toBeLessThanOrEqual(1_000);
       stopped.startupCancellation = { requestedAt: new Date().toISOString() };
       try { await options.onSession(session); submit(); }
       finally { await options.onSession(null); }
       throw new Error("unexpected provider dispatch");
     });
     await executePaperclipNativeSession({ db: leaseDb(first), execution: first, runnerInstanceId: "local-context" });
+    const createRenewal = nativeLeaseRenewal.startNativeSessionExecutionLeaseRenewal;
+    const renewal = vi.spyOn(nativeLeaseRenewal, "startNativeSessionExecutionLeaseRenewal").mockImplementation(input => ({
+      ...createRenewal(input), remainingMs: () => 1_000.75,
+    }));
+    onTestFinished(() => renewal.mockRestore());
     await expect(executePaperclipNativeSession({ db: leaseDb(second, {}, stopped), execution: second, runnerInstanceId: "local-context" }))
       .rejects.toThrow("native_cancellation_pending_recovery");
     expect(cancel).toHaveBeenCalledOnce();
