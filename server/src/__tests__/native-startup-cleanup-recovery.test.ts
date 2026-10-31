@@ -18,6 +18,7 @@ import {
 } from "../services/native-runtime/native-startup-cleanup.js";
 import { isNativeRunnerOwnershipHeld } from "../services/native-runtime/native-runner-ownership.js";
 import { cancelNativeSession } from "../services/native-runtime/native-session-executor.js";
+import * as nativeSessionExecutor from "../services/native-runtime/native-session-executor.js";
 import { NativeExecutionContext } from "../services/native-runtime/native-execution-context.js";
 import type { NativeExecutionInput } from "../vendor/paperclip-runner/index.js";
 import { callbacks } from "../services/heartbeat/__tests__/run-control-fixtures.js";
@@ -269,6 +270,56 @@ rl.on("line",line=>{const m=JSON.parse(line);
     expect(result).toMatchObject({ status: "cancelled" });
     expect(readNativeStartupCleanup(await f.reload())?.state).toBe("complete");
     expect(await f.owner()).toMatchObject({ leaseOwner: null, leaseExpiresAt: null, controlDeadlineAt: null });
+  });
+
+  it("joins cleanup recorded while an operator Stop waits for native startup", async () => {
+    const f = await fixture(true);
+    let entered!: () => void, resume!: () => void;
+    const waiting = new Promise<void>(resolve => { entered = resolve; });
+    const settled = new Promise<void>(resolve => { resume = resolve; });
+    const cancel = nativeSessionExecutor.cancelNativeSession;
+    const spy = vi.spyOn(nativeSessionExecutor, "cancelNativeSession").mockImplementation(async (...args) => {
+      const result = await cancel(...args);
+      if (args[0] === f.request.runId) { entered(); await settled; }
+      return result;
+    });
+    let drained = false;
+    const deps = callbacks(db);
+    deps.verifyStartupCleanup = vi.fn(run => verifyNativeStartupCleanup(db, run, () => f.stopReceipt({}, drained)));
+    const control = createHeartbeatRunControl(db, deps);
+    try {
+      const stopping = control.cancelRunInternal(f.request.runId, "Operator Stop");
+      const outcome = stopping.then(value => ({ value }), error => ({ error }));
+      await waiting;
+      expect(await requestNativeStartupCleanup(db, f.request)).toBe(true);
+      resume();
+      expect(await outcome).toMatchObject({ error: expect.objectContaining({ message: "Task cleanup is still pending" }) });
+      expect(deps.verifyStartupCleanup).toHaveBeenCalledOnce();
+      expect((await f.reload()).status).toBe("running");
+      expect((await f.owner()).leaseOwner).toBe(f.request.leaseOwner);
+      drained = true;
+      expect(await control.cancelRunInternal(f.request.runId, "Operator Stop")).toMatchObject({ status: "cancelled" });
+      expect(readNativeStartupCleanup(await f.reload())?.state).toBe("complete");
+      expect((await f.owner()).leaseOwner).toBeNull();
+    } finally { resume(); spy.mockRestore(); }
+  });
+
+  it("rejects a cancellation commit when cleanup arrives after its final read", async () => {
+    const f = await fixture(true);
+    const deps = callbacks(db), commit = deps.setRunStatusFromLive.getMockImplementation()!;
+    deps.setRunStatusFromLive.mockImplementationOnce(async (...args) => {
+      expect(await requestNativeStartupCleanup(db, f.request)).toBe(true);
+      return commit(...args);
+    });
+    deps.verifyStartupCleanup = vi.fn(run => verifyNativeStartupCleanup(db, run, () => f.stopReceipt({}, true)));
+    const control = createHeartbeatRunControl(db, deps);
+    expect(await control.cancelRunInternal(f.request.runId, "Operator Stop")).toMatchObject({ status: "running" });
+    expect(readNativeStartupCleanup(await f.reload())?.state).toBe("pending");
+    expect((await f.owner()).leaseOwner).toBe(f.request.leaseOwner);
+    expect(deps.startNextQueuedRunForAgent).not.toHaveBeenCalled();
+    expect(await control.cancelRunInternal(f.request.runId, "Operator Stop")).toMatchObject({ status: "cancelled" });
+    expect(readNativeStartupCleanup(await f.reload())?.state).toBe("complete");
+    expect((await f.owner()).leaseOwner).toBeNull();
   });
 
   it("restarts the real cancellation flow after remote Stop committed before Core acknowledgement", async () => {

@@ -1390,10 +1390,6 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               runtimeMode: run.runtimeMode,
               ...(options.cancellationRequestId ? { cancellationRequestId: options.cancellationRequestId } : {}),
             });
-            if (readNativeStartupCleanup(run)) {
-              if (!dependencies.verifyStartupCleanup) throw conflict("Native startup cleanup worker unavailable");
-              await dependencies.verifyStartupCleanup(run);
-            }
             if (running) {
               await terminateHeartbeatRunProcess({
                 pid: running.child.pid,
@@ -1454,12 +1450,13 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           }
 
           const finishedAt = new Date();
-          const persistedCancellationResult =
-            run.runtimeMode === "native"
-              ? await getRun(run.id).then((current) =>
-                  parseObject(current?.resultJson),
-                )
-              : {};
+          let persistedCancellationRun = run.runtimeMode === "native" ? await getRun(run.id) : null;
+          if (persistedCancellationRun && readNativeStartupCleanup(persistedCancellationRun)) {
+            if (!dependencies.verifyStartupCleanup) throw conflict("Native startup cleanup worker unavailable");
+            await dependencies.verifyStartupCleanup(persistedCancellationRun);
+            persistedCancellationRun = await getRun(run.id);
+          }
+          const persistedCancellationResult = parseObject(persistedCancellationRun?.resultJson);
           return await setRunStatusFromLive(
             run.id,
             "cancelled",
@@ -1515,10 +1512,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 : {}),
             },
             undefined,
-            pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult)
-              : readNativeStartupCleanup(run) ? and(nativeRunnerOwnershipNotHeldCondition(),
+            and(pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult)
+              : persistedCancellationRun && readNativeStartupCleanup(persistedCancellationRun) ? and(nativeRunnerOwnershipNotHeldCondition(),
                 sql`not exists (select 1 from ${nativeRunFinalizations} where ${nativeRunFinalizations.runId} = ${run.id} and ${nativeRunFinalizations.resultId} is not null)`)
                 : undefined,
+              run.runtimeMode === "native" ? sql`coalesce(${heartbeatRuns.resultJson}->'nativeStartupCleanup'->>'state', '') <> 'pending'` : undefined),
           );
         } catch (error) {
           if (processCancellationSettlement) {
