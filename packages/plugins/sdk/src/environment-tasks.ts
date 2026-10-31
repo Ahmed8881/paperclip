@@ -148,6 +148,7 @@ export const environmentTaskResultSchema = z.discriminatedUnion("kind", [
     exitCode: z.number().int().optional(),
     /** Provider observed the task and all descendants stopped; terminal phase alone is insufficient. */
     executionStopped: z.boolean().optional(),
+    preparationStopped: z.boolean().optional(),
     /** The provider retains this task's recoverable session state for a later launch. */
     sessionStateAvailable: z.boolean().optional(),
   }).strict(),
