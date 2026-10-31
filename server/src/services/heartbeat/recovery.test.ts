@@ -163,7 +163,7 @@ describe("heartbeat recovery module callbacks", () => {
     expect(database.access).not.toHaveBeenCalled();
   });
 
-  it.each(["adopted_runner_authentication_timeout", "startup_worker_unsettled"] as const)("persists a %s ownership hold before its event without terminating or retrying", async reason => {
+  it.each(["adopted_runner_authentication_timeout"] as const)("persists a %s ownership hold before its event without terminating or retrying", async reason => {
     const database = guardedDatabase();
     const deps = callbacks(database.db);
     const run = { id: "run", runtimeMode: "native", status: "running" } as Run;

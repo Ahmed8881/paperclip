@@ -1024,7 +1024,9 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
                       ? "Native restart recovery is waiting for safe ownership evidence"
                       : disposition.kind === "already_finalized"
                         ? "Native restart recovery found an already-finalized result"
-                        : "Native restart recovery blocked ambiguous or conflicting ownership",
+                        : disposition.reason === "native_startup_cleanup_pending"
+                          ? "Native startup timed out; cancellation and verified cleanup are queued"
+                          : "Native restart recovery blocked ambiguous or conflicting ownership",
             payload: {
               restartKind: isClaim ? disposition.restartKind : restartKind,
               recoveryRequestId: isClaim
@@ -1842,7 +1844,6 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       reason:
         | "live_process_identifier"
         | "observed_owner_unverified"
-        | "startup_worker_unsettled"
         | "adopted_runner_authentication_timeout"
         | "native_chat_workspace_scope_mismatch";
       processPidAlive?: boolean;
@@ -1850,7 +1851,6 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     },
   ) {
     const durableOwnershipHold =
-      evidence.reason === "startup_worker_unsettled" ||
       evidence.reason === "adopted_runner_authentication_timeout" ||
       evidence.reason === "native_chat_workspace_scope_mismatch";
     if (

@@ -29,6 +29,7 @@ import { environmentTaskResultSchema } from "@paperclipai/plugin-sdk";
 import { preparePluginRunnerCredentials } from "./plugin-runner-credentials.js";
 import { createPluginRunnerTaskOwner, verifyPluginRunnerTaskReattachment } from "./plugin-runner-task.js";
 import { NativeExecutionContext } from "./native-execution-context.js";
+import { NativeStartupCleanupPendingError } from "./native-startup-cleanup.js";
 import { coldAdmissionTimeoutMs } from "../../vendor/paperclip-runner/index.js";
 import { applyObservabilityEnvironment, type ProviderObservabilityLaunch } from "@paperclipai/adapter-utils/agent-observability";
 import { museRunnerBroker } from "../muse-runner-broker.js";
@@ -8041,7 +8042,7 @@ export async function executePaperclipNativeSession(input: {
     return await executePaperclipNativeSessionWithinScope(preparedInput);
   } catch (error) {
     executionFailure = error;
-    if (!(error instanceof NativeRunnerOwnershipUnverifiedError) && startup.stopRequested && startup.executionContext?.signal.reason instanceof Error &&
+    if (!(error instanceof NativeRunnerOwnershipUnverifiedError) && !(error instanceof NativeStartupCleanupPendingError) && startup.stopRequested && startup.executionContext?.signal.reason instanceof Error &&
         startup.executionContext.signal.reason.message === "native_session_cancelled") {
       throw new NativeCancellationPendingRecoveryError();
     }
@@ -8106,7 +8107,9 @@ export async function executePaperclipNativeSession(input: {
     releaseRetainedNativeSessionCleanup(input.db, {
       companyId: input.execution.binding.companyId, agentId: input.execution.binding.agentId,
     });
-    if (startupUnsettled) throw new NativeRunnerOwnershipUnverifiedError("startup_worker_unsettled");
+    if (startupUnsettled) throw new NativeStartupCleanupPendingError(startup.executionContext!.id,
+      startup.executionContext!.deadlineAtMs, startup.leaseOwner!, startup.executionContext!.pluginSupported,
+      input.runnerExecutionTarget?.kind === "remote" ? input.runnerExecutionTarget.leaseId ?? undefined : undefined);
   }
 }
 
@@ -9707,6 +9710,8 @@ async function executePaperclipNativeSessionWithinScope(
   } catch (error) {
     executionContext?.abort(error instanceof Error ? error : new Error("native_execution_startup_failed"));
     const startupUnsettled = executionContext ? !(await executionContext.drain()) : false;
+    if (startupUnsettled) throw new NativeStartupCleanupPendingError(executionContext!.id, executionContext!.deadlineAtMs,
+      leaseOwner, executionContext!.pluginSupported, input.runnerExecutionTarget?.kind === "remote" ? input.runnerExecutionTarget.leaseId ?? undefined : undefined);
     // Preserve typed failure semantics while removing credentials before any
     // persistence, reporting, logging, or rethrow at this boundary.
     if (error instanceof Error) {
@@ -9729,7 +9734,7 @@ async function executePaperclipNativeSessionWithinScope(
     const protocolIntegrityFailure =
       error instanceof NativeSessionProtocolIntegrityError ? error : null;
     const ownershipUnverified =
-      startupUnsettled || nativeSessionFailureSourceCode(error) ===
+      nativeSessionFailureSourceCode(error) ===
       NATIVE_ADOPTED_RUNNER_AUTHENTICATION_TIMEOUT;
     const attemptFailureStep = async (operation: () => unknown) => {
       try {
@@ -10192,7 +10197,7 @@ async function executePaperclipNativeSessionWithinScope(
     } finally {
       // Even a secondary logging/recovery-write failure cannot authorize
       // heartbeat to release the retained process or its task ownership.
-      if (ownershipUnverified) throw new NativeRunnerOwnershipUnverifiedError(startupUnsettled ? "startup_worker_unsettled" : "adopted_runner_authentication_timeout");
+      if (ownershipUnverified) throw new NativeRunnerOwnershipUnverifiedError();
       if (protocolIntegrityFailure !== null) throw protocolIntegrityFailure;
     }
   } finally {

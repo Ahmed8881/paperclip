@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { executionWorkspaces, environmentLeases, type Db } from "@paperclipai/db";
 import { environmentTaskOperationSchema, parseEnvironmentTaskResult } from "@paperclipai/plugin-sdk";
-import { executeEnvironmentTask } from "../services/environment-task-runtime.js";
+import { executeEnvironmentTask, settleDispatchedEnvironmentTask } from "../services/environment-task-runtime.js";
 import { NativeExecutionContext } from "../services/native-runtime/native-execution-context.js";
 
 const state = vi.hoisted(() => ({ plugin: {} as any, release: vi.fn(), identity: vi.fn(), config: vi.fn() }));
@@ -27,7 +27,7 @@ function database(value: ReturnType<typeof row> | null = row(), projectRows = [{
   const query: any = { from: (table: unknown) => { selectedRows = table === executionWorkspaces ? workspaceRows : table === environmentLeases ? ownerRows : projectRows; return query; }, leftJoin: () => query, where: vi.fn(() => query), limit: () => Promise.resolve(results.shift()), then: (resolve: (rows: typeof projectRows) => unknown) => Promise.resolve(selectedRows).then(resolve as (rows: unknown[]) => unknown) };
   const sets: Record<string, unknown>[] = [];
   const update: any = { set: (value: Record<string, unknown>) => { sets.push(value); return update; }, where: () => update,
-    returning: async () => [{ id: leaseId }], then: (resolve: (value: unknown) => unknown) => Promise.resolve([]).then(resolve) };
+    returning: async () => [{ id: leaseId, metadata: value?.lease.metadata, heartbeatRunId: value?.lease.heartbeatRunId }], then: (resolve: (value: unknown) => unknown) => Promise.resolve([]).then(resolve) };
   const db = { select: () => query, update: () => update,
     transaction: vi.fn(async (write: (tx: Db) => Promise<unknown>) => write(db as unknown as Db)) };
   return { db: db as unknown as Db, query, sets, transaction: db.transaction };
@@ -44,6 +44,33 @@ beforeEach(() => {
   state.plugin = { id: "original", pluginKey: "test.provider", status: "ready", manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true }] } };
 });
 describe("plugin-provided Runner execution", () => {
+  it.each([false, true])("retires an undispatched warm task only with required preparation proof (%s)", async preparationStopped => {
+    const value = row();
+    Object.assign(value.lease.metadata, { runnerTaskDispatched: false,
+      runnerTaskStartupCleanup: { contextId: "startup", requiresPreparationStop: true } });
+    const fixture = database(value), workers = worker();
+    fixture.db.select = ((...args: unknown[]) => (database(value).db.select as (...values: unknown[]) => unknown)(...args)) as Db["select"];
+    let release!: () => void;
+    const drain = new Promise<void>(resolve => { release = resolve; });
+    const drainStartup = vi.fn(() => drain);
+    Object.assign(workers, { drainStartup });
+    const operations: string[] = [];
+    workers.call.mockImplementation(async (...args: any[]) => {
+      const operation = args[2].operation.kind; operations.push(operation);
+      return operation === "status" ? { kind: "status", taskId: "attempt-1", phase: "cancelled", executionStopped: true, preparationStopped }
+        : { kind: "accepted", taskId: "attempt-1" };
+    });
+    const retiring = settleDispatchedEnvironmentTask(fixture.db, workers as never, { companyId: "company", id: leaseId });
+    const checked = retiring.then(value => ({ value, error: null }), error => ({ value: false, error }));
+    await vi.waitFor(() => expect(operations).toContain("stop"));
+    await vi.waitFor(() => expect(operations).toContain("status"));
+    expect(drainStartup).toHaveBeenCalledWith("startup");
+    expect(operations).not.toContain("complete");
+    release();
+    const result = await checked;
+    if (preparationStopped) { expect(result).toEqual({ value: true, error: null }); expect(operations).toEqual(["stop", "status", "complete"]); }
+    else { expect(result.error?.message).toContain("termination is unconfirmed"); expect(fixture.sets).toContainEqual(expect.objectContaining({ status: "pending_cleanup", cleanupStatus: "failed" })); }
+  });
   it("negotiates the transient context without reading transport for an older plugin", async () => {
     const context = new NativeExecutionContext({ binding: { companyId: "company", agentId: "agent", runId: "run" } } as never, 1_000);
     const workers = worker();

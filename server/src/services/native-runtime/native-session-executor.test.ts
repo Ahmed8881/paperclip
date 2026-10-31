@@ -11673,7 +11673,7 @@ describe("runnerd provider runtime wiring", () => {
         await expect(executePaperclipNativeSession({ ...options, execution: followup, db: dbFor(followup, resumed),
           runnerExecutionTarget: { ...target, leaseId: "followup-lease", sandboxLeaseAcquisition: {
             outcome: "resumed", providerLeaseId: "replacement-task" } } as never }))
-          .rejects.toMatchObject({ message: "native_execution_ownership_unverified", reason: "startup_worker_unsettled" });
+          .rejects.toMatchObject({ message: "native_startup_cleanup_pending", requiresPreparationStop: false });
         expect(state.execute).toHaveBeenCalledOnce();
         expect(rebind).not.toHaveBeenCalled();
         return;

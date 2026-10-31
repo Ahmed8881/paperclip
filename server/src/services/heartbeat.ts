@@ -393,6 +393,7 @@ import {
   isNativeRunnerOwnershipHeld,
   NATIVE_OWNERSHIP_UNVERIFIED_ERROR_CODE,
 } from "./native-runtime/native-runner-ownership.js";
+import { NativeStartupCleanupPendingError, requestNativeStartupCleanup, verifyNativeStartupCleanup, readNativeStartupCleanup } from "./native-runtime/native-startup-cleanup.js";
 import {
   emitAgentTaskRun,
   emitAgentTaskRunById,
@@ -1424,6 +1425,14 @@ export function heartbeatService(
   }
 
   const runControl = createHeartbeatRunControl(db, {
+    verifyStartupCleanup: async run => {
+      await verifyNativeStartupCleanup(db, run, () => envOrchestrator.releaseForRun({
+        heartbeatRunId: run.id, companyId: run.companyId, agentId: run.agentId, status: "expired",
+        cancelActiveWork: true, providerResourceDisposition: "destroy",
+      }));
+      const marker = readNativeStartupCleanup(run)!;
+      await options.pluginWorkerManager?.retireStartup?.(marker.contextId);
+    },
     getRun,
     getRunCleanupState,
     getRunExecutionWait,
@@ -1936,6 +1945,14 @@ export function heartbeatService(
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
     let nativeSessionResumeScheduled = false;
     let nativeOwnershipHeld = false;
+    let nativeStartupCleanupScheduled = false;
+    const requestStartupCleanup = async (error: NativeStartupCleanupPendingError) => {
+      nativeStartupCleanupScheduled = true;
+      await requestNativeStartupCleanup(db, { companyId: run.companyId, agentId: run.agentId, runId: run.id,
+        contextId: error.contextId, deadlineAtMs: error.deadlineAtMs, leaseOwner: error.leaseOwner,
+        leaseId: error.leaseId,
+        requiresPreparationStop: error.requiresPreparationStop });
+    };
     let instructionWorkingCopy: ReturnType<typeof createHeartbeatInstructionWorkingCopy> | null = null;
     let nativeDispatchStarted = false;
     let nativeWorkspaceFinalizeScheduled = false;
@@ -3541,6 +3558,10 @@ export function heartbeatService(
         }));
       } catch (err) {
         await persistUsageCaptureFailure?.();
+        if (err instanceof NativeStartupCleanupPendingError) {
+          await requestStartupCleanup(err);
+          return;
+        }
         if (err instanceof NativeControllerDetachedForRestartError) {
           nativeSessionResumeScheduled = true;
           return;
@@ -3671,7 +3692,9 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
-      if (
+      if (nativeStartupCleanupScheduled || outerErr instanceof NativeStartupCleanupPendingError) {
+        if (outerErr instanceof NativeStartupCleanupPendingError) await requestStartupCleanup(outerErr);
+      } else if (
         nativeOwnershipHeld ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
@@ -3708,7 +3731,7 @@ export function heartbeatService(
         );
       } else {
         await preserveNativeWorkspaceOnFailure();
-        if (!nativeOwnershipHeld) await runCompletion.failRunSetup({
+        if (!nativeOwnershipHeld && !nativeStartupCleanupScheduled) await runCompletion.failRunSetup({
           run, runId, outerErr, signal: executionControl.controller.signal,
           providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted,
           identityRedactor, readFailureReportSecrets,
@@ -3758,7 +3781,7 @@ export function heartbeatService(
           latestRun &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !nativeStartupCleanupScheduled
         ) {
           latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
             (terminalizeErr) => {
@@ -3784,7 +3807,7 @@ export function heartbeatService(
         if (
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !nativeStartupCleanupScheduled
         ) {
           // Keep launchers during same-run recovery. At a terminal boundary all
           // operations have settled; clean before the remote lease can be stopped.
@@ -3907,7 +3930,7 @@ export function heartbeatService(
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "cancelled")));
         }
         if (latestRun?.runtimeMode === "native" && isHeartbeatRunTerminalStatus(latestRun.status) &&
-            !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled && !nativeOwnershipHeld) {
+            !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled && !nativeOwnershipHeld && !nativeStartupCleanupScheduled) {
           await settleNativeRunProcess(db, run.id).catch(error => {
             logger.warn({ err: error, runId: run.id }, "failed to release settled native process identity");
           });
@@ -3944,7 +3967,7 @@ export function heartbeatService(
         caseHandoffCleanupSettled = hasStoppedLocalProcessTree(latestRun);
       }
       if (caseHandoffCleanupSettled && latestRun && !nativeSessionResumeScheduled && !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld && isHeartbeatRunTerminalStatus(latestRun.status)) {
+          !nativeOwnershipHeld && !nativeStartupCleanupScheduled && isHeartbeatRunTerminalStatus(latestRun.status)) {
         const handoff = await pendingCaseHandoffForRun(db, run.id);
         if (handoff) await recordCaseHandoffExecutionReleased(db, run.id, handoff.issueId);
       }
