@@ -17987,7 +17987,6 @@ export function issueRoutes(
         ))
       )
         return;
-      await assertPendingReviewInteractionVerdictAllowed(req, issue, current);
 
       const actor = getActorInfo(req);
       let nativeRunId: string | null = null;

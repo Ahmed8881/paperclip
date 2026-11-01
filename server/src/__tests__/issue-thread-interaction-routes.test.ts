@@ -1266,6 +1266,42 @@ describe("issue thread interaction routes", () => {
     expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(ASSIGNEE_AGENT_ID, expect.anything());
   });
 
+  it.each([
+    { name: "A", reviewPolicy: "human_only", kind: "request_confirmation", agentId: CREATED_AGENT_ID, status: 200 },
+    { name: "B", reviewPolicy: "human_only", kind: "request_confirmation", agentId: UNRELATED_AGENT_ID, status: 403 },
+    { name: "C", reviewPolicy: "human_only", kind: "ask_user_questions", agentId: CREATED_AGENT_ID, status: 200 },
+    { name: "D", reviewPolicy: null, kind: "request_confirmation", agentId: CREATED_AGENT_ID, status: 200 },
+  ])("applies withdrawal permissions, not the review verdict policy, to a bound review card ($name)", async ({ reviewPolicy, kind, agentId, status }) => {
+    mockReviewTransition.value = {
+      actorType: "agent",
+      actorId: CREATED_AGENT_ID,
+      details: { reviewInteractionId: "interaction-withdraw" },
+    };
+    mockIssueService.getById.mockResolvedValueOnce(createIssue({
+      status: "in_review",
+      reviewPolicy,
+      createdByAgentId: CREATED_AGENT_ID,
+      createdByUserId: null,
+    }));
+    mockInteractionService.getForIssue.mockResolvedValueOnce({
+      id: "interaction-withdraw",
+      kind,
+      status: "pending",
+      createdByAgentId: CREATED_AGENT_ID,
+      sourceRunId: RUN_1,
+      requestedResolverPolicy: "anyone",
+      effectiveResolverPolicy: "anyone",
+      payload: { version: 1, prompt: "Approve this review?" },
+    });
+    const app = await createApp({ type: "agent", agentId, companyId: "company-1", runId: agentId === CREATED_AGENT_ID ? RUN_1 : RUN_3 });
+    const res = await request(app)
+      .post("/api/issues/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/interactions/interaction-withdraw/withdraw")
+      .send({});
+    expect(res.status).toBe(status);
+    if (status === 200) expect(mockInteractionService.withdrawInteraction).toHaveBeenCalled();
+    else expect(mockInteractionService.withdrawInteraction).not.toHaveBeenCalled();
+  });
+
   it("allows the assignee agent to withdraw without waking itself", async () => {
     mockIssueService.getById.mockResolvedValueOnce(createIssue({ status: "todo" }));
     const app = await createApp({ type: "agent", agentId: ASSIGNEE_AGENT_ID, companyId: "company-1", runId: RUN_2 });
